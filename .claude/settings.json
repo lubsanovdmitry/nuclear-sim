@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest tests/test_pke.py -v)",
+      "Bash(pytest tests/test_thermal.py -v)",
+      "Bash(pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_xenon.py -v)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(pytest tests/test_reactivity.py -v)",
+      "Bash(pytest tests/test_plant.py -v)",
+      "Bash(python -m pytest tests/test_eccs_pressurizer.py tests/test_plant.py -v)",
+      "Bash(python -c \"from api.server import app; print\\('import OK'\\)\")",
+      "Bash(python -m pytest tests/test_accidents.py -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(uvicorn api.server:app --port 8000)",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(echo \"SERVER_STATUS:$?\")",
+      "Bash(python3 -)"
+    ]
+  }
+}
