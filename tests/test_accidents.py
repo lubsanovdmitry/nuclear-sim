@@ -1,8 +1,11 @@
 """Tests for accident scenario trigger functions."""
 
+import asyncio
+
 import pytest
 
-from api.state import default_state
+from api.state import default_state, PlantState
+from api.simulation_loop import simulation_tick
 from physics.constants import (
     ECCS_HPSI_THRESHOLD,
     PRESSURE_SCRAM_LOW,
@@ -11,9 +14,15 @@ from physics.constants import (
 from physics.xenon import xenon_equilibrium, xenon_reactivity
 from accidents.loop import trigger_loop
 from accidents.sbo import trigger_sbo
-from accidents.loca import trigger_loca
+from accidents.loca import trigger_loca, update_loca
 from accidents.rod_ejection import trigger_rod_ejection
 from accidents.xenon_pit import trigger_xenon_pit
+
+
+async def _run(state: PlantState, n: int, dt: float = 0.1) -> PlantState:
+    for _ in range(n):
+        state = await simulation_tick(state, dt=dt)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -225,3 +234,102 @@ def test_xenon_pit_subcritical_at_cold_temps() -> None:
     assert rho < 0.0, (
         f"Reactor should remain subcritical in cold xenon pit (rho={rho:.4f})"
     )
+
+
+# ---------------------------------------------------------------------------
+# LOCA — Phase 2 two-phase tests
+# ---------------------------------------------------------------------------
+
+def test_loca_large_break_eccs_armed_no_fuel_damage() -> None:
+    """Large break (1.0), ECCS armed: fuel_damage=False after 120 s (1200 ticks).
+
+    HPSI activates within ~3 ticks (pressure drops below 100 bar quickly).
+    loca_flow_fraction recovers faster than it decays once HPSI is on.
+    With SCRAM reducing fission power and ECCS providing cooling,
+    DNBR stays above 1.0 and fuel_damage never sets.
+    """
+    state = trigger_loca(default_state(), break_size=1.0)
+    state = asyncio.run(_run(state, 1200))
+    assert not state.fuel_damage, (
+        f"fuel_damage set unexpectedly after 120 s with ECCS armed "
+        f"(dnbr_low_timer={state.dnbr_low_timer:.2f})"
+    )
+
+
+def test_loca_large_break_no_eccs_fuel_damage() -> None:
+    """Large break, eccs_armed=False, SCRAM bypassed (ATWS): fuel_damage=True within 45 s.
+
+    With full fission power maintained and no ECCS cooling, loca_flow_fraction
+    decays to zero (~12.5 s), CHF collapses, DNBR < 1.0 for 5 s → fuel_damage.
+    SCRAM is bypassed to hold power; this represents the worst-case ATWS+LOCA scenario.
+    """
+    state = trigger_loca(default_state(), break_size=1.0)
+    state.eccs_armed = False
+    state.scram_bypasses = ["LO_PRESSURE", "LO_FLOW", "HI_FUEL_TEMP",
+                            "HI_COOL_TEMP", "HI_PRESSURE", "HI_POWER"]
+
+    for tick in range(450):
+        state.n = 1.0  # maintain power (ATWS: SCRAM bypassed, rods stay out)
+        state = asyncio.run(_run(state, 1))
+        if state.fuel_damage:
+            break
+
+    assert state.fuel_damage, (
+        f"fuel_damage not set within 45 s with no ECCS and full power "
+        f"(dnbr_low_timer={state.dnbr_low_timer:.2f}, dnbr={state.dnbr:.3f})"
+    )
+
+
+def test_loca_small_break_slow_pressure_decay() -> None:
+    """Small break (0.05): pressure decays slowly, still above 100 bar after 60 s.
+
+    The pressurizer counteracts the slow blowdown; combined with the small
+    break_size, pressure equilibrates well above the HPSI threshold at 60 s.
+    No fuel damage expected.
+    """
+    state = trigger_loca(default_state(), break_size=0.05)
+    state = asyncio.run(_run(state, 600))   # 60 s
+
+    assert state.pressure > ECCS_HPSI_THRESHOLD, (
+        f"Pressure reached HPSI threshold too quickly for small break: "
+        f"{state.pressure/1e5:.1f} bar at t=60 s"
+    )
+    assert not state.fuel_damage, "fuel_damage set during small-break LOCA with ECCS"
+
+
+def test_loca_void_spike_within_5s() -> None:
+    """Large break: void_fraction.mean() > 0.2 within first 5 s (50 ticks).
+
+    Rapid depressurization drops T_sat below coolant temperature; all nodes
+    flash to steam within a few ticks, giving a core-average void well above 20%.
+    """
+    state = trigger_loca(default_state(), break_size=1.0)
+    max_void_mean = 0.0
+    for _ in range(50):
+        state = asyncio.run(_run(state, 1))
+        max_void_mean = max(max_void_mean, float(state.void_fraction.mean()))
+
+    assert max_void_mean > 0.2, (
+        f"Void fraction mean did not exceed 0.2 within 5 s of large break "
+        f"(max mean void = {max_void_mean:.3f})"
+    )
+
+
+def test_loca_scram_fires_within_5s() -> None:
+    """Large break: SCRAM fires within 5 s (pressure drops below 120 bar immediately).
+
+    trigger_loca sets pressure to 105 bar (<120 bar SCRAM_LOW), so the
+    end-of-tick SCRAM check fires on the very first simulation tick.
+    """
+    state = trigger_loca(default_state(), break_size=1.0)
+    scram_fired = False
+    for _ in range(50):    # 50 ticks = 5 s
+        state = asyncio.run(_run(state, 1))
+        if state.scram:
+            scram_fired = True
+            assert state.t <= 5.0 + 0.15, (
+                f"SCRAM fired too late at t={state.t:.2f} s"
+            )
+            break
+
+    assert scram_fired, "SCRAM did not fire within 5 s of large-break LOCA"

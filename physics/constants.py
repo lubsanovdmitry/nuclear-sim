@@ -143,6 +143,18 @@ PRZR_MAKEUP_COEFF: float = 0.030     # per second per unit ECCS injection flow
 PRZR_HEATER_DPDT_MAX: float = 2.0e4  # Pa/s maximum pressure-raise rate at 100% heater demand
 PRZR_SPRAY_DPDT_MAX: float = 4.0e4   # Pa/s maximum pressure-drop  rate at 100% spray demand
 
+# Axial nodalization parameters (Phase 2)
+# CP_COOL: specific heat of pressurized water at ~300°C, 155 bar.
+# NOMINAL_FLOW_RATE: primary coolant mass flow rate chosen so that
+#   NOMINAL_FLOW_RATE * CP_COOL ≈ 54.6 MW/K — matches PWR hot-leg rise of ~55 K
+#   at 3 GW (cold leg 270°C → hot leg 325°C).
+# Note: M_DOT_NOM_CP_COOL = 1e8 W/K used in the Phase 1 lumped model represents
+#   an effective heat-capacity flow rate calibrated to the core-average coolant
+#   temperature (T_REF_COOLANT = 300°C), which is ~half the hot-leg outlet rise.
+CP_COOL: float = 5900.0           # J/kg·K
+NOMINAL_FLOW_RATE: float = 9259.0 # kg/s  (NOMINAL_FLOW_RATE * CP_COOL ≈ 54.63 MW/K)
+A_FUEL_NODE: float = 0.06         # m²  effective fuel-to-coolant heat transfer area per node
+
 # Pilot-Operated Relief Valve (PORV) — mounted on pressurizer top
 # Opens automatically above 157 bar; recloses at ≤ 155 bar (nominal setpoint).
 # A stuck-open PORV (TMI-2 initiating event) causes a slow primary-system bleed.
@@ -154,3 +166,22 @@ PORV_CLOSE_SETPOINT: float = 1.55e7  # Pa (155 bar) — auto-close threshold
 # (below the 120-bar SCRAM setpoint); with tau=10 s the SCRAM is reached in ~27 s.
 PORV_FLOW_DEFICIT: float = 0.75      # equivalent flow-loss fraction when PORV is open
 PORV_LEVEL_DRAIN: float = 0.005      # fraction/s pressurizer level drain when open
+
+# Void reactivity coefficients (Phase 2)
+ALPHA_VOID_PWR: float = -0.02   # dk/k per unit void fraction (PWR — small, accidents only)
+ALPHA_VOID_BWR: float = -0.15   # dk/k per unit void fraction (BWR — dominant feedback mechanism)
+
+# Two-phase thermal hydraulics (Phase 2)
+CHF_0: float = 1.5e6          # W/m²  nominal PWR rod bundle critical heat flux
+C0_DRIFT: float = 1.13        # Zuber-Findlay distribution parameter (bubbly/slug flow)
+V_GJ: float = 0.23            # m/s   drift velocity (Zuber-Findlay)
+G_NOMINAL: float = 3500.0     # kg/m²s  nominal PWR mass flux
+
+# Heat flux physical scaling (Phase 2)
+# A_FUEL_NODE=0.06 m² is a lumped simulator area for the thermal ODE; the raw flux
+# q = power/(N*A_FUEL_NODE) is ~5 GW/m² at nominal — unphysical for CHF/DNBR.
+# HEAT_FLUX_SCALE converts to real rod-surface flux (~560 kW/m² at nominal peak),
+# giving DNBR ≈ 2.54 at 100% power and DNBR ≈ 1.96 at 130% (APPROACH_CHF fires).
+# Derived: target_peak_flux / (cosine_peak_shape * NOMINAL_POWER_W / (N * A_FUEL_NODE))
+#        = 5.9e5 / (1.34 * 3e9 / (10 * 0.06)) ≈ 8.8e-5
+HEAT_FLUX_SCALE: float = 8.8e-5  # dimensionless, physical rod-bundle area ratio

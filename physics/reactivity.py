@@ -8,6 +8,8 @@ import numpy as np
 from physics.constants import (
     ALPHA_DOPPLER,
     ALPHA_MODERATOR,
+    ALPHA_VOID_BWR,
+    ALPHA_VOID_PWR,
     BORON_COEFFICIENT,
     ROD_WORTH_MIN,
     ROD_WORTH_MAX,
@@ -60,6 +62,26 @@ def moderator_reactivity(t_cool: float) -> float:
     return ALPHA_MODERATOR * (t_cool - T_REF_COOLANT)
 
 
+def void_reactivity(
+    void_fraction_arr: np.ndarray,
+    power_shape: np.ndarray,
+    reactor_type: str = 'PWR',
+) -> float:
+    """Power-weighted void reactivity feedback.
+
+    Args:
+        void_fraction_arr: void fraction per axial node, shape (N,)
+        power_shape: axial power shape (mean=1.0), shape (N,)
+        reactor_type: 'PWR' or 'BWR'
+
+    Returns:
+        rho_void (dk/k); ≈ 0 at PWR nominal, ≈ -0.06 at BWR 40% void
+    """
+    alpha_avg = float(np.average(void_fraction_arr, weights=power_shape))
+    alpha_void_coeff = ALPHA_VOID_BWR if reactor_type == 'BWR' else ALPHA_VOID_PWR
+    return alpha_void_coeff * alpha_avg
+
+
 def boron_reactivity(boron_ppm: float) -> float:
     """Dissolved boron reactivity.
 
@@ -79,11 +101,13 @@ def compute_reactivity(state: PlantState) -> float:
         state: current plant state
 
     Returns:
-        rho_total = rho_rods + rho_doppler + rho_moderator + rho_xenon + rho_boron
+        rho_total = rho_rods + rho_doppler + rho_moderator + rho_xenon + rho_boron + rho_void
     """
     rho_rods = rod_reactivity(state.rod_positions)
     rho_doppler = doppler_reactivity(state.t_fuel)
-    rho_moderator = moderator_reactivity(state.t_cool)
+    t_cool_eff = float(np.average(state.t_cool_axial, weights=state.axial_power_shape))
+    rho_moderator = moderator_reactivity(t_cool_eff)
     rho_xenon = xenon_reactivity(state.xenon)
     rho_boron = boron_reactivity(state.boron_ppm)
-    return rho_rods + rho_doppler + rho_moderator + rho_xenon + rho_boron
+    rho_void = void_reactivity(state.void_fraction, state.axial_power_shape)
+    return rho_rods + rho_doppler + rho_moderator + rho_xenon + rho_boron + rho_void

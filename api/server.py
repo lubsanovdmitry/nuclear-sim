@@ -79,6 +79,18 @@ def _state_to_ws(s: PlantState) -> dict:
         "porv_open": s.porv_open,
         "porv_stuck_open": s.porv_stuck_open,
         "scram_bypasses": list(s.scram_bypasses),
+        # Phase 2 — axial / two-phase fields
+        "void_fraction":       [round(float(v), 4) for v in s.void_fraction],
+        "heat_flux":           [round(float(q), 1) for q in s.heat_flux],
+        "t_fuel_axial":        [round(float(t) - 273.15, 2) for t in s.t_fuel_axial],
+        "t_cool_axial":        [round(float(t) - 273.15, 2) for t in s.t_cool_axial],
+        "boiling_regime":      list(s.boiling_regime),
+        "film_boiling_nodes":  list(s.film_boiling_nodes),
+        "axial_power_shape":   [round(float(p), 4) for p in s.axial_power_shape],
+        "dnbr":                round(s.dnbr, 4),
+        "chf":                 round(s.chf, 1),
+        "fuel_damage":         s.fuel_damage,
+        "peak_heat_flux_node": s.peak_heat_flux_node,
     }
 
 
@@ -215,8 +227,9 @@ async def trigger_scenario(scenario: ScenarioInput) -> dict:
             for ds in _state.diesel_states:
                 ds.state = "failed"
         elif name == "loca":
-            # Large-break LOCA: rapid RCS depressurization
-            _state.pressure = 5.0e6  # ~50 bar — triggers SCRAM and ECCS
+            # Large-break LOCA: Phase 2 full blowdown + ECCS + reflood
+            from accidents.loca import trigger_loca
+            _state = trigger_loca(_state, break_size=1.0)
         elif name == "rod_ejection":
             # Eject bank A: mechanically failed rod moves from current position to 100%
             # withdrawn instantly. ejection_rho is a permanent positive reactivity insertion

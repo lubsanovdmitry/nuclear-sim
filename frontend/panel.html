@@ -284,6 +284,41 @@ body {
 
 /* ── Reactivity readout ── */
 .rho-unit { font-size:10px; color:var(--dim); margin-left:2px; }
+
+/* ── Phase 2: Axial Core Map ── */
+.axial-card { min-width: 110px; }
+.axial-map  { display: flex; flex-direction: column; gap: 2px; }
+.axial-row  { display: flex; align-items: center; gap: 3px; cursor: default; }
+.axial-node-lbl {
+  width: 12px; font-size: 10px; color: var(--dim);
+  text-align: right; flex-shrink: 0; line-height: 1;
+}
+.axial-cell {
+  width: 60px; height: 28px; display: flex;
+  border: 1px solid #1e2d40; box-sizing: border-box; overflow: hidden;
+}
+.axial-cell.film-boil { border: 2px solid var(--red); }
+.axial-void-fill { width: 40px; height: 100%; flex-shrink: 0; transition: background .3s; }
+.axial-power-wrap {
+  width: 20px; height: 100%; background: #0f1a26;
+  position: relative; overflow: hidden; flex-shrink: 0;
+}
+.axial-power-bar {
+  height: 100%; background: #4a5a6a;
+  position: absolute; left: 0; top: 0; transition: width .2s;
+}
+.axial-regime {
+  font-size: 10px; margin-top: 6px; letter-spacing: 1px;
+  text-align: center; font-weight: bold;
+}
+
+/* ── Phase 2: DNBR Gauge ── */
+.dnbr-card { min-width: 140px; display: flex; flex-direction: column; align-items: center; }
+@keyframes fuel-damage-pulse {
+  0%,100% { background: #2a0008; }
+  50%      { background: #550010; }
+}
+.fuel-damage { animation: fuel-damage-pulse 1s infinite; }
 </style>
 </head>
 <body>
@@ -466,6 +501,40 @@ body {
   </div>
 
 </div><!-- end row 1 -->
+
+<!-- ═══ ROW 1B: PHASE 2 INSTRUMENTS ═══ -->
+<div class="row" style="align-items:flex-start;">
+
+  <!-- Axial core map -->
+  <div class="card axial-card">
+    <div class="ctitle">CORE AXIAL MAP</div>
+    <div class="axial-map" id="axialMap"></div>
+    <div class="axial-regime" id="axialRegime" style="color:var(--green);">REGIME: SINGLE PHASE</div>
+  </div>
+
+  <!-- DNBR gauge -->
+  <div class="card dnbr-card" id="dnbrCard">
+    <div class="ctitle">DNBR</div>
+    <svg id="dnbrSvg" viewBox="0 0 120 105" style="width:120px;height:105px;">
+      <path id="dnbrBg"  fill="none" stroke="#0f1a26" stroke-width="16" stroke-linecap="round"/>
+      <path id="dnbrZR"  fill="none" stroke="#ff1744" stroke-width="16" stroke-linecap="round" opacity="0.75"/>
+      <path id="dnbrZO"  fill="none" stroke="#ff6d00" stroke-width="16" stroke-linecap="round" opacity="0.75"/>
+      <path id="dnbrZY"  fill="none" stroke="#ffd600" stroke-width="16" stroke-linecap="round" opacity="0.75"/>
+      <path id="dnbrZG"  fill="none" stroke="#00e676" stroke-width="16" stroke-linecap="round" opacity="0.75"/>
+      <line id="dnbrNeedle" x1="60" y1="60" x2="60" y2="28"
+            stroke="#c8d8e8" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="60" cy="60" r="5" fill="#8aabb8"/>
+      <text id="dnbrVal" x="60" y="73" fill="#00e676"
+            font-size="18" font-family="monospace" font-weight="bold" text-anchor="middle">2.50</text>
+      <text x="60" y="85" fill="#3a5568" font-size="9"
+            font-family="monospace" text-anchor="middle">DNBR</text>
+      <text x="7"   y="101" fill="#3a5568" font-size="8" font-family="monospace">0</text>
+      <text x="113" y="101" fill="#3a5568" font-size="8" font-family="monospace" text-anchor="end">4.0</text>
+    </svg>
+    <div style="font-size:10px;color:var(--dim);margin-top:2px;text-align:center;">Limit 1.3 | Safe &gt; 2.5</div>
+  </div>
+
+</div><!-- end row 1b -->
 
 <!-- ═══ ROW 2: PUMPS + DIESEL/ECCS ═══ -->
 <div class="row">
@@ -1066,6 +1135,10 @@ function handleState(s) {
   pushChart(chTemps, s.t_fuel, s.t_cool);
   pushChart(chRho, s.rho_total, s.xenon_worth, s.rho_rod ?? 0, s.rho_doppler ?? 0, s.rho_moderator ?? 0, s.rho_boron ?? 0);
 
+  // ── Phase 2 instruments ──
+  updateAxialMap(s);
+  updateDnbrGauge(s);
+
   if (!s.scram) checkProtections(s);
 
   // Sync bypass toggles from server state (covers page reload / reconnect)
@@ -1256,6 +1329,134 @@ function updateDesc() {
     SCEN_DESC[document.getElementById('scenSel').value] || '';
 }
 
+// ─── PHASE 2: VOID COLOR ─────────────────────────────────────────────────────
+function voidColor(alpha) {
+  if (alpha < 0.005) return '#1a3a5c';
+  if (alpha < 0.20)  return '#4a90d9';
+  if (alpha < 0.50)  return '#a8d8ea';
+  if (alpha < 0.70)  return '#e8f4f8';
+  return '#ff6b35';
+}
+
+// ─── PHASE 2: AXIAL MAP ──────────────────────────────────────────────────────
+function initAxialMap() {
+  const container = document.getElementById('axialMap');
+  if (!container) return;
+  container.innerHTML = '';
+  // Render node 9 first in DOM (top of column), node 0 last (bottom)
+  for (let i = 9; i >= 0; i--) {
+    const row = document.createElement('div');
+    row.className = 'axial-row'; row.id = 'axial-row-' + i;
+
+    const lbl = document.createElement('span');
+    lbl.className = 'axial-node-lbl'; lbl.textContent = i;
+
+    const cell = document.createElement('div');
+    cell.className = 'axial-cell'; cell.id = 'axial-cell-' + i;
+
+    const voidFill = document.createElement('div');
+    voidFill.className = 'axial-void-fill'; voidFill.id = 'axial-void-' + i;
+    voidFill.style.background = '#1a3a5c';
+
+    const powerWrap = document.createElement('div');
+    powerWrap.className = 'axial-power-wrap';
+
+    const powerBar = document.createElement('div');
+    powerBar.className = 'axial-power-bar'; powerBar.id = 'axial-power-' + i;
+    powerBar.style.width = '13px'; // ~1.0/1.5 × 20px default
+
+    powerWrap.appendChild(powerBar);
+    cell.appendChild(voidFill); cell.appendChild(powerWrap);
+    row.appendChild(lbl); row.appendChild(cell);
+    container.appendChild(row);
+  }
+}
+
+function updateAxialMap(s) {
+  const vf    = s.void_fraction     || Array(10).fill(0);
+  const ps    = s.axial_power_shape || Array(10).fill(1);
+  const tfAx  = s.t_fuel_axial      || Array(10).fill(600);
+  const tcAx  = s.t_cool_axial      || Array(10).fill(300);
+  const hf    = s.heat_flux         || Array(10).fill(0);
+  const fbSet = new Set(s.film_boiling_nodes || []);
+  const rgms  = s.boiling_regime    || Array(10).fill('single_phase');
+
+  for (let i = 0; i < 10; i++) {
+    const vEl = document.getElementById('axial-void-'  + i);
+    const pEl = document.getElementById('axial-power-' + i);
+    const cEl = document.getElementById('axial-cell-'  + i);
+    const rEl = document.getElementById('axial-row-'   + i);
+    if (!vEl || !pEl || !cEl || !rEl) continue;
+
+    vEl.style.background = voidColor(vf[i]);
+    // Power bar: width ∝ shape value, max at value=1.5 → 20px
+    pEl.style.width = Math.round(Math.min(ps[i] / 1.5, 1.0) * 20) + 'px';
+
+    if (fbSet.has(i)) cEl.classList.add('film-boil');
+    else              cEl.classList.remove('film-boil');
+
+    // Hover tooltip
+    rEl.title =
+      'Node ' + i +
+      ' | void: ' + vf[i].toFixed(2) +
+      ' | T_fuel: ' + tfAx[i].toFixed(0) + '\u00b0C' +
+      ' | T_cool: ' + tcAx[i].toFixed(0) + '\u00b0C' +
+      ' | q: ' + ((hf[i] || 0) / 1e6).toFixed(2) + ' MW/m\u00b2';
+  }
+
+  // Worst boiling regime across all nodes → colored status text
+  const ORDER = ['single_phase', 'subcooled_boiling', 'nucleate_boiling', 'film_boiling'];
+  let worst = 'single_phase';
+  rgms.forEach(r => { if (ORDER.indexOf(r) > ORDER.indexOf(worst)) worst = r; });
+  const regEl = document.getElementById('axialRegime');
+  if (regEl) {
+    regEl.textContent = 'REGIME: ' + worst.replace(/_/g, ' ').toUpperCase();
+    regEl.style.color =
+      worst === 'film_boiling'      ? 'var(--red)'    :
+      worst === 'nucleate_boiling'  ? 'var(--yellow)' :
+      worst === 'subcooled_boiling' ? 'var(--cyan)'   : 'var(--green)';
+  }
+}
+
+// ─── PHASE 2: DNBR GAUGE ─────────────────────────────────────────────────────
+// Same arc geometry as pressure gauge (cx=60,cy=60,r=46), 270° sweep, range 0–4.0
+const DNBR_G = { cx: 60, cy: 60, r: 46, s: 225, e: 495, max: 4.0 };
+function dnbrAng(v) {
+  return DNBR_G.s + (Math.min(Math.max(v, 0), DNBR_G.max) / DNBR_G.max) * (DNBR_G.e - DNBR_G.s);
+}
+
+function initDnbrGauge() {
+  const g = DNBR_G;
+  document.getElementById('dnbrBg').setAttribute('d', arcD(g.s, g.e, g.cx, g.cy, g.r));
+  // Color zone arcs: red 0–1.3, orange 1.3–2.0, yellow 2.0–2.5, green 2.5–4.0
+  const a13 = dnbrAng(1.3), a20 = dnbrAng(2.0), a25 = dnbrAng(2.5);
+  document.getElementById('dnbrZR').setAttribute('d', arcD(g.s, a13,  g.cx, g.cy, g.r));
+  document.getElementById('dnbrZO').setAttribute('d', arcD(a13,  a20,  g.cx, g.cy, g.r));
+  document.getElementById('dnbrZY').setAttribute('d', arcD(a20,  a25,  g.cx, g.cy, g.r));
+  document.getElementById('dnbrZG').setAttribute('d', arcD(a25,  g.e,  g.cx, g.cy, g.r));
+  updateDnbrGauge({ dnbr: 2.5, fuel_damage: false });
+}
+
+function updateDnbrGauge(s) {
+  const val = (s.dnbr != null) ? s.dnbr : 2.5;
+  // Needle tip at r−14=32 to stay inside the stroke band (stroke-width=16, band 38–54)
+  const np = ang2xy(dnbrAng(Math.min(Math.max(val, 0), DNBR_G.max)),
+                    DNBR_G.cx, DNBR_G.cy, DNBR_G.r - 14);
+  const needle = document.getElementById('dnbrNeedle');
+  if (needle) { needle.setAttribute('x2', np.x.toFixed(1)); needle.setAttribute('y2', np.y.toFixed(1)); }
+
+  const col = val < 1.3 ? '#ff1744' : val < 2.0 ? '#ff6d00' : val < 2.5 ? '#ffd600' : '#00e676';
+  const valEl = document.getElementById('dnbrVal');
+  if (valEl) { valEl.textContent = val.toFixed(2); valEl.setAttribute('fill', col); }
+
+  // Pulse card background red when fuel_damage is set (irreversible state)
+  const card = document.getElementById('dnbrCard');
+  if (card) {
+    if (s.fuel_damage) card.classList.add('fuel-damage');
+    else               card.classList.remove('fuel-damage');
+  }
+}
+
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 (function initPowerGauge() {
   const cfg = PG;
@@ -1285,6 +1486,8 @@ initAlarms();
 updateDesc();
 updatePowerGauge(100);
 updatePressureGauge(155);
+initAxialMap();
+initDnbrGauge();
 connectWS();
 </script>
 </body>

@@ -8,6 +8,7 @@ from physics.reactivity import (
     doppler_reactivity,
     moderator_reactivity,
     boron_reactivity,
+    void_reactivity,
     compute_reactivity,
 )
 from physics.xenon import xenon_equilibrium, xenon_reactivity, rk4_step_xenon
@@ -157,6 +158,7 @@ class TestComputeReactivity:
             rod_positions=[100.0, 100.0, 100.0, 100.0],
             t_fuel=T_REF_FUEL,
             t_cool=T_REF_COOLANT,
+            t_cool_axial=np.full(10, T_REF_COOLANT),  # zero moderator feedback
             xenon=0.0,
             boron_ppm=0.0,
         )
@@ -183,8 +185,16 @@ class TestComputeReactivity:
 
     def test_moderator_feedback_increases_with_temperature(self):
         """Higher coolant temperature → more negative total reactivity."""
-        base = PlantState(t_cool=T_REF_COOLANT, rod_positions=[100.0]*4)
-        hot = PlantState(t_cool=T_REF_COOLANT + 50.0, rod_positions=[100.0]*4)
+        base = PlantState(
+            t_cool=T_REF_COOLANT,
+            t_cool_axial=np.full(10, T_REF_COOLANT),
+            rod_positions=[100.0]*4,
+        )
+        hot = PlantState(
+            t_cool=T_REF_COOLANT + 50.0,
+            t_cool_axial=np.full(10, T_REF_COOLANT + 50.0),
+            rod_positions=[100.0]*4,
+        )
         assert compute_reactivity(hot) < compute_reactivity(base)
 
     def test_xenon_peak_reactivity_below_threshold(self):
@@ -222,7 +232,8 @@ class TestComputeReactivity:
     def test_components_sum_correctly(self):
         """compute_reactivity equals manual sum of components."""
         from physics.reactivity import (
-            rod_reactivity, doppler_reactivity, moderator_reactivity, boron_reactivity
+            rod_reactivity, doppler_reactivity, moderator_reactivity,
+            boron_reactivity, void_reactivity,
         )
         state = PlantState(
             rod_positions=[75.0, 75.0, 75.0, 75.0],
@@ -231,11 +242,118 @@ class TestComputeReactivity:
             xenon=1.0e21,
             boron_ppm=200.0,
         )
+        t_cool_eff = float(np.average(state.t_cool_axial, weights=state.axial_power_shape))
         expected = (
             rod_reactivity(state.rod_positions)
             + doppler_reactivity(state.t_fuel)
-            + moderator_reactivity(state.t_cool)
+            + moderator_reactivity(t_cool_eff)
             + xenon_reactivity(state.xenon)
             + boron_reactivity(state.boron_ppm)
+            + void_reactivity(state.void_fraction, state.axial_power_shape)
         )
         assert abs(compute_reactivity(state) - expected) < 1e-15
+
+
+# ---------------------------------------------------------------------------
+# void_reactivity (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestVoidReactivity:
+    def test_zero_void_gives_zero_rho(self):
+        """PWR nominal — all zeros → no void feedback."""
+        from physics.axial import cosine_power_shape
+        shape = cosine_power_shape(10)
+        rho = void_reactivity(np.zeros(10), shape, reactor_type='PWR')
+        assert rho == 0.0
+
+    def test_bwr_40pct_void_approx_minus_006(self):
+        """BWR at uniform 40% void → alpha_avg = 0.4 → rho ≈ -0.06."""
+        shape = np.ones(10)
+        rho = void_reactivity(np.full(10, 0.4), shape, reactor_type='BWR')
+        assert abs(rho - (-0.06)) < 1e-10
+
+    def test_pwr_void_smaller_than_bwr(self):
+        """PWR void coeff is smaller in magnitude than BWR."""
+        shape = np.ones(10)
+        alpha = np.full(10, 0.3)
+        rho_pwr = void_reactivity(alpha, shape, reactor_type='PWR')
+        rho_bwr = void_reactivity(alpha, shape, reactor_type='BWR')
+        assert abs(rho_pwr) < abs(rho_bwr)
+
+    def test_power_weighted_average_used(self):
+        """Higher void in high-power nodes counts more than edge nodes."""
+        from physics.axial import cosine_power_shape
+        shape = cosine_power_shape(10)
+        # Void concentrated at center (high-power) nodes
+        void_center = np.zeros(10)
+        void_center[4:6] = 0.5
+        # Void concentrated at edge (low-power) nodes
+        void_edge = np.zeros(10)
+        void_edge[0] = 0.5
+        void_edge[-1] = 0.5
+        rho_center = void_reactivity(void_center, shape)
+        rho_edge = void_reactivity(void_edge, shape)
+        # Center nodes are higher power → larger magnitude feedback
+        assert abs(rho_center) > abs(rho_edge)
+
+
+# ---------------------------------------------------------------------------
+# PlantState Phase 2 fields
+# ---------------------------------------------------------------------------
+
+class TestPlantStatePhase2Fields:
+    def test_default_state_has_all_phase2_fields(self):
+        """default_state() returns PlantState with all Phase 2 arrays and scalars."""
+        from api.state import default_state
+        s = default_state()
+        assert hasattr(s, 't_fuel_axial')
+        assert s.t_fuel_axial.shape == (10,)
+        assert hasattr(s, 't_cool_axial')
+        assert s.t_cool_axial.shape == (10,)
+        assert hasattr(s, 'void_fraction')
+        assert s.void_fraction.shape == (10,)
+        assert hasattr(s, 'quality')
+        assert s.quality.shape == (10,)
+        assert hasattr(s, 'heat_flux')
+        assert s.heat_flux.shape == (10,)
+        assert hasattr(s, 'htc')
+        assert s.htc.shape == (10,)
+        assert hasattr(s, 'boiling_regime')
+        assert len(s.boiling_regime) == 10
+        assert hasattr(s, 'axial_power_shape')
+        assert s.axial_power_shape.shape == (10,)
+        assert hasattr(s, 'dnbr')
+        assert s.dnbr == 2.5
+        assert hasattr(s, 'chf')
+        assert s.chf == 1.5e6
+        assert hasattr(s, 'peak_heat_flux_node')
+        assert s.peak_heat_flux_node == 5
+        assert hasattr(s, 'fuel_damage')
+        assert s.fuel_damage is False
+        assert hasattr(s, 'film_boiling_nodes')
+        assert s.film_boiling_nodes == []
+        assert hasattr(s, 'loca_active')
+        assert s.loca_active is False
+        assert hasattr(s, 'loca_break_size')
+        assert s.loca_break_size == 0.0
+        assert hasattr(s, 'dnbr_low_timer')
+        assert s.dnbr_low_timer == 0.0
+
+    def test_default_void_fraction_zeros(self):
+        """PWR nominal: all nodes subcooled, void = 0."""
+        from api.state import default_state
+        s = default_state()
+        np.testing.assert_array_equal(s.void_fraction, np.zeros(10))
+
+    def test_default_axial_power_shape_cosine(self):
+        """Default axial power shape is cosine-normalized (mean=1)."""
+        from api.state import default_state
+        s = default_state()
+        assert abs(s.axial_power_shape.mean() - 1.0) < 1e-12
+
+    def test_compute_reactivity_near_zero_at_equilibrium(self):
+        """compute_reactivity returns near-zero for default_state equilibrium."""
+        from api.state import default_state
+        s = default_state()
+        rho = compute_reactivity(s)
+        assert abs(rho) < 1e-3, f"Equilibrium rho = {rho:.6f}, expected |rho| < 1e-3"

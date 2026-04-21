@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
+from physics.axial import cosine_power_shape
+
 
 @dataclass
 class PlantState:
@@ -87,6 +89,30 @@ class PlantState:
 
     # Permanent positive reactivity from ejected rod; zeroed when SCRAM fires
     ejection_rho: float = 0.0
+
+    # Phase 2 — axial nodalization (all shape (10,)); defaults keep Phase 1 unaffected
+    t_fuel_axial: np.ndarray = field(default_factory=lambda: np.full(10, 873.15))
+    t_cool_axial: np.ndarray = field(default_factory=lambda: np.linspace(543.15, 598.15, 10))
+    void_fraction: np.ndarray = field(default_factory=lambda: np.zeros(10))
+    quality: np.ndarray = field(default_factory=lambda: np.zeros(10))
+    heat_flux: np.ndarray = field(default_factory=lambda: np.zeros(10))
+    htc: np.ndarray = field(default_factory=lambda: np.full(10, 30000.0))
+    boiling_regime: list = field(default_factory=lambda: ['single_phase'] * 10)
+    axial_power_shape: np.ndarray = field(default_factory=lambda: cosine_power_shape(10))
+
+    # Phase 2 — derived safety parameters
+    dnbr: float = 2.5
+    chf: float = 1.5e6
+    peak_heat_flux_node: int = 5
+    fuel_damage: bool = False
+    film_boiling_nodes: list = field(default_factory=list)
+
+    # Phase 2 — LOCA tracking
+    loca_active: bool = False
+    loca_break_size: float = 0.0
+    dnbr_low_timer: float = 0.0
+    loca_flow_fraction: float = 1.0   # max flow allowed by LOCA coolant loss (1.0 = no restriction)
+    lpsi_timer: float = 0.0           # seconds of sustained LPSI injection (drives reflood)
 
     # Control flags
     scram: bool = False

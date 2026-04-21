@@ -1,10 +1,14 @@
-"""Lumped one-node fuel / one-node coolant thermal model — pure functions, numpy only."""
+"""Lumped and nodal fuel/coolant thermal models — pure functions, numpy only."""
 
+import numpy as np
+
+from physics.axial import axial_coolant_temp, flat_power_shape
 from physics.constants import (
+    A_FUEL_NODE,
     H_TRANSFER_A,
-    M_FUEL_CP_FUEL,
     M_COOL_CP_COOL,
     M_DOT_NOM_CP_COOL,
+    M_FUEL_CP_FUEL,
     T_COOLANT_INLET,
 )
 
@@ -56,3 +60,45 @@ def step_thermal(
     d_t_cool = (q_transfer - q_removed) / M_COOL_CP_COOL
 
     return t_fuel + d_t_fuel * dt, t_cool + d_t_cool * dt
+
+
+def step_thermal_nodal(
+    t_fuel: np.ndarray,
+    t_cool: np.ndarray,
+    void_fraction: np.ndarray,
+    power_shape: np.ndarray,
+    total_power: float,
+    flow_fraction: float,
+    decay_heat: float,
+    pressure: float,
+    t_in: float,
+    dt: float,
+    htc: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Explicit-Euler nodal thermal step.  N = len(t_fuel).
+
+    Fuel: integrated via explicit Euler.
+    Coolant: quasi-steady via axial_coolant_temp() each tick
+             (τ_cool ~2 s >> dt = 0.1 s, so quasi-steady is valid).
+
+    htc: W/m²K per node, from two_phase.heat_transfer_coefficient().
+         If None, stubbed as 30 000 W/m²K until two_phase.py exists.
+
+    Returns (new_t_fuel, new_t_cool), each shape (N,).
+    """
+    N = len(t_fuel)
+    if htc is None:
+        htc = np.full(N, 30_000.0)
+
+    m_fuel_cp_node = M_FUEL_CP_FUEL / N
+
+    new_t_fuel = t_fuel.copy()
+    for n in range(N):
+        q_fiss = power_shape[n] * total_power / N
+        q_decay = decay_heat / N
+        q_trans = htc[n] * A_FUEL_NODE * (t_fuel[n] - t_cool[n])
+        d_t_fuel = (q_fiss + q_decay - q_trans) * dt / m_fuel_cp_node
+        new_t_fuel[n] = t_fuel[n] + d_t_fuel
+
+    new_t_cool = axial_coolant_temp(t_in, power_shape, total_power + decay_heat, flow_fraction, N)
+    return new_t_fuel, new_t_cool
