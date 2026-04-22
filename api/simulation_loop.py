@@ -124,7 +124,6 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
         s.t_fuel_axial, s.t_cool_axial, s.void_fraction, s.axial_power_shape,
         fission_power, s.flow_fraction, dh, s.pressure, s.t_in, dt, htc=s.htc,
     )
-
     # ── Step 9: Thermodynamic quality per node ────────────────────────────────
     s.quality = np.array([
         thermodynamic_quality(float(s.t_cool_axial[n]), s.pressure)
@@ -154,6 +153,23 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
         s.dnbr_low_timer = 0.0
     if s.dnbr_low_timer > 5.0:
         s.fuel_damage = True
+
+    # ── Coolant pre-step (before reactivity/PKE) ─────────────────────────────
+    # Update s.t_cool only so PKE sub-steps see a current-tick coolant temperature.
+    # s.t_fuel is intentionally NOT updated here — the PKE sub-step loop owns fuel
+    # temperature (t_fuel_sub) and writes it back to s.t_fuel after integration.
+    eccs_flow_pre = s.eccs_state.injection_flow_fraction
+    total_flow_pre = s.flow_fraction + eccs_flow_pre
+    if total_flow_pre > 1e-6 and eccs_flow_pre > 0.0:
+        from physics.constants import M_DOT_NOM_CP_COOL, M_COOL_CP_COOL
+        t_in_eff = (s.flow_fraction * s.t_in + eccs_flow_pre * ECCS_WATER_TEMP) / total_flow_pre
+        q_transfer = H_TRANSFER_A * (s.t_fuel - s.t_cool)
+        q_removed = total_flow_pre * M_DOT_NOM_CP_COOL * (s.t_cool - t_in_eff)
+        s.t_cool += (q_transfer - q_removed) / M_COOL_CP_COOL * dt
+    else:
+        _, s.t_cool = step_thermal(
+            s.t_fuel, s.t_cool, fission_power, s.flow_fraction, dh, dt, t_in=s.t_in
+        )
 
     # ── Step 14: Reactivity components ───────────────────────────────────────
     rod_pos = [0.0, 0.0, 0.0, 0.0] if s.scram else s.rod_positions
@@ -207,6 +223,7 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
 
     s.n = max(0.0, float(pke_state[0]))
     s.precursors = np.maximum(0.0, pke_state[1:7])
+    s.t_fuel = t_fuel_sub  # carry sub-step fuel temp forward; PKE owns t_fuel
 
     # ── Step 16: Xenon / Iodine ───────────────────────────────────────────────
     s.iodine, s.xenon = rk4_step_xenon(s.iodine, s.xenon, s.n, dt)
@@ -224,24 +241,6 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
         secondary_flow = 0.0
     t_in_target = T_COOLANT_INLET + (s.t_cool - T_COOLANT_INLET) * (1.0 - secondary_flow)
     s.t_in += (t_in_target - s.t_in) / TAU_STEAM_GENERATOR * dt
-
-    # ── Scalar thermal (Phase 1 model kept for backward compat) ──────────────
-    # scalar t_fuel / t_cool are updated here; Phase 2 axial arrays updated above.
-    eccs_flow = s.eccs_state.injection_flow_fraction
-    total_flow = s.flow_fraction + eccs_flow
-    if total_flow > 1e-6 and eccs_flow > 0.0:
-        from physics.constants import M_DOT_NOM_CP_COOL, M_COOL_CP_COOL
-        t_in_eff = (s.flow_fraction * s.t_in + eccs_flow * ECCS_WATER_TEMP) / total_flow
-        q_transfer = H_TRANSFER_A * (s.t_fuel - s.t_cool)
-        q_removed = total_flow * M_DOT_NOM_CP_COOL * (s.t_cool - t_in_eff)
-        d_tf = (fission_power + dh - q_transfer) / M_FUEL_CP_FUEL
-        d_tc = (q_transfer - q_removed) / M_COOL_CP_COOL
-        s.t_fuel = s.t_fuel + d_tf * dt
-        s.t_cool = s.t_cool + d_tc * dt
-    else:
-        s.t_fuel, s.t_cool = step_thermal(
-            s.t_fuel, s.t_cool, fission_power, s.flow_fraction, dh, dt, t_in=s.t_in
-        )
 
     # ── Step 19: Pumps — coastdown / natural circulation ─────────────────────
     s.pump_speeds = step_pumps(s.pump_speeds, s.pumps, s.offsite_power, dt)

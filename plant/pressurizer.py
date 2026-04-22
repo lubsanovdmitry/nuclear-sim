@@ -63,10 +63,13 @@ def step_pressurizer(
     # pressure downward — the physically correct direction.
     flow_deficit = (1.0 - flow_fraction) + (PORV_FLOW_DEFICIT if porv_open else 0.0)
     p_target -= PRESSURE_TEMP_COEFF * 50.0 * flow_deficit  # 50 K equivalent per unit flow loss
+    # Cold ECCS injection at 293 K drives p_target deeply negative via the linear
+    # temperature coefficient; clamp to atmospheric so the lag can't pull RCS sub-zero.
+    p_target = max(p_target, 1e5)
     dp_dt = (p_target - pressure) / PRESSURE_TAU
     dp_dt += heater_fraction * PRZR_HEATER_DPDT_MAX
     dp_dt -= spray_fraction * PRZR_SPRAY_DPDT_MAX
-    return pressure + dp_dt * dt
+    return max(pressure + dp_dt * dt, 1e5)
 
 
 def step_pressurizer_level(
