@@ -517,6 +517,15 @@ Replace the Phase 1 tick with this extended order:
 25. serialize to WebSocket JSON
 ```
 
+**Ordering note (deterministic behavior):** In this Phase 2 ordering, pumps are
+updated before diesel states each tick. If a diesel crosses to `running` at step 20,
+its pump-train recovery takes effect at step 19 of the next tick (0.1 s later).
+This is expected and should be accounted for in strict-timing assertions.
+
+**Replay seed note:** Deterministic replay may reseed the simulation RNG used for
+diesel start-delay sampling before a scenario trigger. If no seed is provided, the
+server keeps unseeded gameplay variability.
+
 ***
 
 ## 6. New Alarms (add to `api/alarms.py`)
@@ -555,6 +564,10 @@ Add to the existing WebSocket message (all display-unit conversions in `_state_t
 ```
 
 Temperatures in °C, heat_flux in W/m².
+
+Replay/debug telemetry can be added as non-breaking fields, including diesel
+start timers/delays, diesel start signals, per-pump power source, and diesel RNG
+seed/state metadata.
 
 ***
 
@@ -692,7 +705,25 @@ P2-S7   Integration: run all Phase 2 acceptance criteria, fix regressions
 
 ## Implementation Notes — P2-S4 (`api/simulation_loop.py` + `api/alarms.py`)
 
-**Status: DONE** — 195/195 tests pass (6 new loop Phase 2 + all prior).
+**Status: DONE** — 214/214 tests pass (Phase 2 plus prior suites).
+
+### Diesel-backed pump cap (Phase 2 assumption)
+
+Diesel-backed pump restoration is intentionally capped below full offsite-power
+performance for training realism:
+
+- `DIESEL_PUMP_SPEED_MAX = 0.5` (normalized speed cap on diesel power)
+- `DIESEL_PUMP_RAMP_RATE = 0.05 /s` (ramp toward cap)
+
+This models partial AC recovery on emergency buses while preserving full-speed
+operation for nominal offsite AC.
+
+### Diesel start randomness and deterministic replay
+
+Runtime diesel start delay is randomized in the 10–15 s design range. For deterministic
+integration tests or replay scenarios, inject/seed the RNG used by the diesel state
+machine (rather than changing physics logic). This keeps gameplay variability while
+allowing reproducible CI assertions.
 
 ### Heat flux physical scaling (`HEAT_FLUX_SCALE`)
 

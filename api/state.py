@@ -94,6 +94,7 @@ class PlantState:
     t_fuel_axial: np.ndarray = field(default_factory=lambda: np.full(10, 873.15))
     t_cool_axial: np.ndarray = field(default_factory=lambda: np.linspace(543.15, 598.15, 10))
     void_fraction: np.ndarray = field(default_factory=lambda: np.zeros(10))
+    void_fraction_dyn: np.ndarray = field(default_factory=lambda: np.zeros(10))
     quality: np.ndarray = field(default_factory=lambda: np.zeros(10))
     heat_flux: np.ndarray = field(default_factory=lambda: np.zeros(10))
     htc: np.ndarray = field(default_factory=lambda: np.full(10, 30000.0))

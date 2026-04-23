@@ -27,6 +27,7 @@ def trigger_loca(state: PlantState, break_size: float = 1.0) -> PlantState:
     """
     state.loca_active = True
     state.loca_break_size = break_size
+    state.eccs_armed = True
     state.pressure -= break_size * 50e5
     if "LOCA" not in state.alarms:
         state.alarms = list(state.alarms) + ["LOCA"]

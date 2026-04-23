@@ -1,11 +1,20 @@
 """Tests for plant/pumps.py and plant/diesels.py."""
 
+import asyncio
+
 import numpy as np
 import pytest
 
+from api.simulation_loop import simulation_tick
+from api.state import default_state
 from plant.pumps import step_pumps, total_flow_fraction
 from plant.diesels import DieselState, step_diesels
-from physics.constants import PUMP_COASTDOWN_TAU, DIESEL_START_DELAY_MIN, DIESEL_START_DELAY_MAX
+from physics.constants import (
+    DIESEL_PUMP_SPEED_MAX,
+    DIESEL_START_DELAY_MAX,
+    DIESEL_START_DELAY_MIN,
+    PUMP_COASTDOWN_TAU,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +64,36 @@ class TestPumpCostdown:
             speeds = step_pumps(speeds, powered, offsite_power=False, dt=5.0)
             assert np.all(speeds < prev)
             prev = speeds.copy()
+
+    def test_diesel_powered_pumps_ramp_and_cap(self) -> None:
+        speeds = np.zeros(4)
+        powered = [True] * 4
+        for _ in range(200):
+            speeds = step_pumps(
+                speeds,
+                powered,
+                offsite_power=False,
+                dt=0.1,
+                diesel_powered=[True, True, True, True],
+            )
+        assert speeds.max() <= DIESEL_PUMP_SPEED_MAX + 1e-9
+        assert speeds.min() >= DIESEL_PUMP_SPEED_MAX - 1e-3
+
+    def test_diesel_bus_assignment_partial_power(self) -> None:
+        speeds = np.zeros(4)
+        powered = [True] * 4
+        for _ in range(200):
+            speeds = step_pumps(
+                speeds,
+                powered,
+                offsite_power=False,
+                dt=0.1,
+                diesel_powered=[True, True, False, False],
+            )
+        assert speeds[0] >= 0.49
+        assert speeds[1] >= 0.49
+        assert speeds[2] <= 0.1
+        assert speeds[3] <= 0.1
 
 
 class TestFlowFraction:
@@ -154,6 +193,57 @@ class TestDieselStateMachine:
         # Transition step (dt=1.0) resets timer to 0; only the second step (dt=5.0) adds time
         assert states[0].start_timer == pytest.approx(5.0)
 
+    def test_randomized_delay_in_range(self) -> None:
+        rng = np.random.default_rng(42)
+        delays: list[float] = []
+        for _ in range(100):
+            states = [DieselState()]
+            states = step_diesels(states, [True], dt=0.1, rng=rng)
+            delays.append(states[0].start_delay)
+        assert all(DIESEL_START_DELAY_MIN <= d <= DIESEL_START_DELAY_MAX for d in delays)
+
+    def test_seeded_rng_is_deterministic(self) -> None:
+        rng_a = np.random.default_rng(7)
+        rng_b = np.random.default_rng(7)
+        a = step_diesels([DieselState()], [True], dt=0.1, rng=rng_a)[0].start_delay
+        b = step_diesels([DieselState()], [True], dt=0.1, rng=rng_b)[0].start_delay
+        assert a == pytest.approx(b)
+
+    def test_default_midpoint_when_rng_none(self) -> None:
+        state = step_diesels([DieselState()], [True], dt=0.1, rng=None)[0]
+        assert state.start_delay == pytest.approx((DIESEL_START_DELAY_MIN + DIESEL_START_DELAY_MAX) / 2.0)
+
     def test_invalid_state_raises(self) -> None:
         with pytest.raises(ValueError):
             DieselState(state="unknown")
+
+
+class TestLoopRecovery:
+    async def _run(self, state: object, n: int, dt: float = 0.1) -> object:
+        for _ in range(n):
+            state = await simulation_tick(state, dt=dt)
+        return state
+
+    def test_loop_diesel_restores_forced_flow(self) -> None:
+        state = default_state()
+        state.offsite_power = False
+        state.diesel_start_signals = [True, True]
+        state = asyncio.run(self._run(state, 300))  # 30 s
+        assert any(d.state == "running" for d in state.diesel_states)
+        assert state.flow_fraction > 0.2
+
+    def test_loop_pump_speed_capped_at_diesel_max(self) -> None:
+        state = default_state()
+        state.offsite_power = False
+        state.diesel_start_signals = [True, True]
+        state = asyncio.run(self._run(state, 400))  # 40 s
+        assert state.pump_speeds.max() <= DIESEL_PUMP_SPEED_MAX + 0.01
+
+    def test_sbo_no_pump_recovery(self) -> None:
+        state = default_state()
+        state.offsite_power = False
+        state.diesel_start_signals = [False, False]
+        for ds in state.diesel_states:
+            ds.state = "failed"
+        state = asyncio.run(self._run(state, 1200))  # 120 s coastdown
+        assert state.flow_fraction <= 0.05

@@ -5,6 +5,9 @@ States: standby → starting → running (or failed).
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+
+import numpy as np
+
 from physics.constants import DIESEL_START_DELAY_MIN, DIESEL_START_DELAY_MAX
 
 DIESEL_STATES = frozenset({"standby", "starting", "running", "failed"})
@@ -27,6 +30,7 @@ def step_diesels(
     states: list[DieselState],
     start_signals: list[bool],
     dt: float,
+    rng: np.random.Generator | None = None,
 ) -> list[DieselState]:
     """Advance diesel generator states by dt seconds.
 
@@ -48,6 +52,8 @@ def step_diesels(
         if ns.state == "standby" and signal:
             ns.state = "starting"
             ns.start_timer = 0.0
+            if rng is not None:
+                ns.start_delay = float(rng.uniform(DIESEL_START_DELAY_MIN, DIESEL_START_DELAY_MAX))
         elif ns.state == "starting":
             ns.start_timer += dt
             if ns.start_timer >= ns.start_delay:

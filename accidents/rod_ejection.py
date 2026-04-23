@@ -17,9 +17,18 @@ def trigger_rod_ejection(state: PlantState) -> PlantState:
       Doppler feedback self-limits the power excursion if within design basis.
       High-power SCRAM signal fires from the simulation loop.
     """
+    current_pos = state.rod_positions[_EJECTED_BANK]
+
     rod_positions = list(state.rod_positions)
     rod_positions[_EJECTED_BANK] = 100.0
     state.rod_positions = rod_positions
+
+    rod_target_positions = list(state.rod_target_positions)
+    rod_target_positions[_EJECTED_BANK] = 100.0
+    state.rod_target_positions = rod_target_positions
+
+    state.ejection_rho = 0.01 * (100.0 - current_pos) / 100.0
+
     if "ROD_EJECTION" not in state.alarms:
         state.alarms = list(state.alarms) + ["ROD_EJECTION"]
     return state

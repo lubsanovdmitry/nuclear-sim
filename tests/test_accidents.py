@@ -98,7 +98,9 @@ def test_loca_pressure_above_hpsi_threshold() -> None:
 
 
 def test_loca_eccs_armed() -> None:
-    state = trigger_loca(default_state())
+    s = default_state()
+    s.eccs_armed = False
+    state = trigger_loca(s)
     assert state.eccs_armed is True
 
 
@@ -110,6 +112,12 @@ def test_loca_alarm_added() -> None:
 def test_loca_pressure_reduced_from_nominal() -> None:
     state = trigger_loca(default_state())
     assert state.pressure < PRESSURE_NOMINAL
+
+
+def test_loca_pressure_scales_with_break_size() -> None:
+    s = default_state()
+    state = trigger_loca(s, break_size=0.5)
+    assert state.pressure == pytest.approx(130.0e5)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +143,25 @@ def test_rod_ejection_alarm_added() -> None:
     assert "ROD_EJECTION" in state.alarms
 
 
+def test_rod_ejection_sets_target_position() -> None:
+    state = trigger_rod_ejection(default_state())
+    assert state.rod_target_positions[0] == pytest.approx(100.0)
+
+
+def test_rod_ejection_sets_ejection_rho() -> None:
+    s = default_state()
+    s.rod_positions = [50.0, 100.0, 100.0, 100.0]
+    state = trigger_rod_ejection(s)
+    assert state.ejection_rho == pytest.approx(0.005)
+
+
+def test_rod_ejection_at_100pct_has_zero_rho() -> None:
+    s = default_state()
+    s.rod_positions = [100.0, 100.0, 100.0, 100.0]
+    state = trigger_rod_ejection(s)
+    assert state.ejection_rho == pytest.approx(0.0)
+
+
 def test_rod_ejection_inserts_positive_reactivity() -> None:
     """Ejecting a partially-inserted bank from 50% to 100% removes negative rod worth."""
     from physics.reactivity import compute_reactivity
@@ -146,6 +173,7 @@ def test_rod_ejection_inserts_positive_reactivity() -> None:
     s_after = trigger_rod_ejection(s_before)
     rho_after = compute_reactivity(s_after)
 
+    assert s_after.ejection_rho > 0.0
     assert rho_after > rho_before, (
         f"Reactivity should increase after rod ejection: {rho_before:.6f} -> {rho_after:.6f}"
     )

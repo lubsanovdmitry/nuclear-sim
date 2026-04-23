@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from typing import Any
 
 import numpy as np
 
@@ -37,7 +38,7 @@ from physics.constants import (
     TAU_STEAM_GENERATOR, BORON_RATE_PPM_PER_S, ROD_SPEED_PCT_PER_S,
     PORV_OPEN_SETPOINT, PORV_CLOSE_SETPOINT, PORV_LEVEL_DRAIN,
     PRESSURE_SCRAM_HIGH, PRESSURE_SCRAM_LOW,
-    HEAT_FLUX_SCALE,
+    HEAT_FLUX_SCALE, REGIME_HTC_TAU, VOID_FRACTION_FILTER_TAU,
 )
 from physics.thermal import t_sat_celsius
 from plant.pumps import step_pumps, total_flow_fraction
@@ -64,6 +65,40 @@ _SCRAM_HIGH_FUEL_TEMP: float = 1173.15
 _SCRAM_HIGH_COOL_TEMP: float = 623.15
 
 _N_NODES: int = 10
+_SIM_RNG: np.random.Generator = np.random.default_rng()
+_SIM_RNG_SEED: int | None = None
+
+
+def set_sim_rng_seed(seed: int | None) -> None:
+    """Reseed (or randomize) the simulation RNG used by diesel start timing.
+
+    Args:
+        seed: Explicit seed for deterministic replay; None restores unseeded variability.
+    """
+    global _SIM_RNG, _SIM_RNG_SEED
+    if seed is None:
+        _SIM_RNG = np.random.default_rng()
+        _SIM_RNG_SEED = None
+        return
+    _SIM_RNG = np.random.default_rng(int(seed))
+    _SIM_RNG_SEED = int(seed)
+
+
+def get_sim_rng_debug() -> dict[str, Any]:
+    """Return JSON-serializable RNG debug metadata for replay diagnostics."""
+    bitgen_state = _SIM_RNG.bit_generator.state
+    state_payload: dict[str, int] = {}
+    if isinstance(bitgen_state.get("state"), dict):
+        raw_state = bitgen_state["state"]
+        for key in ("state", "inc"):
+            if key in raw_state:
+                state_payload[key] = int(raw_state[key])
+    return {
+        "diesel_rng_seed": _SIM_RNG_SEED,
+        "diesel_rng_seeded": _SIM_RNG_SEED is not None,
+        "diesel_rng_bit_generator": str(bitgen_state.get("bit_generator", "unknown")),
+        "diesel_rng_state": state_payload,
+    }
 
 
 async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
@@ -104,24 +139,31 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
     # ── Step 4: Per-node heat flux (scaled to physical rod-surface flux) ──────
     s.heat_flux = actual_heat_flux_array(s.axial_power_shape, fission_power, _N_NODES) * HEAT_FLUX_SCALE
 
-    # ── Step 5: Critical heat flux ────────────────────────────────────────────
-    s.chf = critical_heat_flux(s.flow_fraction, s.pressure, float(s.quality.mean()))
+    # ── Step 5: CHF estimate for regime classification (uses previous-tick quality) ──
+    chf_regime = critical_heat_flux(s.flow_fraction, s.pressure, float(s.quality.mean()))
 
     # ── Step 6: Boiling regime per node ──────────────────────────────────────
     s.boiling_regime = [
-        _boiling_regime(float(s.void_fraction[n]), float(s.heat_flux[n]), s.chf)
+        _boiling_regime(
+            float(s.void_fraction_dyn[n]),
+            float(s.heat_flux[n]),
+            chf_regime,
+            prev_regime=str(s.boiling_regime[n]),
+        )
         for n in range(_N_NODES)
     ]
 
     # ── Step 7: Heat transfer coefficient per node ────────────────────────────
-    s.htc = np.array([
-        heat_transfer_coefficient(s.boiling_regime[n], s.flow_fraction, float(s.void_fraction[n]))
+    htc_target = np.array([
+        heat_transfer_coefficient(s.boiling_regime[n], s.flow_fraction, float(s.void_fraction_dyn[n]))
         for n in range(_N_NODES)
     ])
+    alpha_htc = dt / (REGIME_HTC_TAU + dt)
+    s.htc = s.htc + alpha_htc * (htc_target - s.htc)
 
     # ── Step 8: Nodal thermal step → t_fuel_axial, t_cool_axial ─────────────
     s.t_fuel_axial, s.t_cool_axial = step_thermal_nodal(
-        s.t_fuel_axial, s.t_cool_axial, s.void_fraction, s.axial_power_shape,
+        s.t_fuel_axial, s.t_cool_axial, s.void_fraction_dyn, s.axial_power_shape,
         fission_power, s.flow_fraction, dh, s.pressure, s.t_in, dt, htc=s.htc,
     )
     # ── Step 9: Thermodynamic quality per node ────────────────────────────────
@@ -137,7 +179,18 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
         + void_fraction_subcooled(float(s.t_cool_axial[n]), t_sat_k, float(s.heat_flux[n]), s.pressure)
         for n in range(_N_NODES)
     ])
-    s.void_fraction = np.clip(new_void, 0.0, 0.95)
+    void_target = np.clip(new_void, 0.0, 0.95)
+    # Keep raw void for display/diagnostics; filter only dynamics coupling.
+    s.void_fraction = void_target
+    alpha_void = dt / (VOID_FRACTION_FILTER_TAU + dt)
+    s.void_fraction_dyn = np.clip(
+        s.void_fraction_dyn + alpha_void * (void_target - s.void_fraction_dyn),
+        0.0,
+        0.95,
+    )
+
+    # Recompute CHF using current-tick quality for DNBR/safety outputs.
+    s.chf = critical_heat_flux(s.flow_fraction, s.pressure, float(s.quality.mean()))
 
     # ── Step 11: DNBR ─────────────────────────────────────────────────────────
     s.peak_heat_flux_node = int(np.argmax(s.heat_flux))
@@ -181,7 +234,7 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
     s.rho_xenon = xenon_reactivity(s.xenon)
     s.rho_boron = boron_reactivity(s.boron_ppm)
     s.rho_eccs = eccs_reactivity(s.eccs_state, s.t_cool)
-    rho_void = void_reactivity(s.void_fraction, s.axial_power_shape)
+    rho_void = void_reactivity(s.void_fraction_dyn, s.axial_power_shape)
     rho = (
         s.rho_rod + s.rho_doppler + s.rho_moderator
         + s.rho_xenon + s.rho_boron + s.rho_eccs + rho_void
@@ -243,7 +296,16 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
     s.t_in += (t_in_target - s.t_in) / TAU_STEAM_GENERATOR * dt
 
     # ── Step 19: Pumps — coastdown / natural circulation ─────────────────────
-    s.pump_speeds = step_pumps(s.pump_speeds, s.pumps, s.offsite_power, dt)
+    diesel_0_running = s.diesel_states[0].state == "running"
+    diesel_1_running = s.diesel_states[1].state == "running"
+    diesel_powered = [diesel_0_running, diesel_0_running, diesel_1_running, diesel_1_running]
+    s.pump_speeds = step_pumps(
+        s.pump_speeds,
+        s.pumps,
+        s.offsite_power,
+        dt,
+        diesel_powered=diesel_powered,
+    )
     s.flow_fraction = total_flow_fraction(s.pump_speeds, s.t_fuel - s.t_cool)
 
     # ── LOCA blowdown, ECCS ramp, reflood ────────────────────────────────────
@@ -251,7 +313,7 @@ async def simulation_tick(state: PlantState, dt: float = 0.1) -> PlantState:
         s = update_loca(s, dt)
 
     # ── Step 20: Diesels ──────────────────────────────────────────────────────
-    s.diesel_states = step_diesels(s.diesel_states, s.diesel_start_signals, dt)
+    s.diesel_states = step_diesels(s.diesel_states, s.diesel_start_signals, dt, rng=_SIM_RNG)
 
     # ── Step 21: ECCS actuation ───────────────────────────────────────────────
     s.eccs_state = step_eccs(s.pressure, s.eccs_armed, s.t_cool, s.flow_fraction)

@@ -89,6 +89,10 @@ PUMP_COASTDOWN_TAU: float = 30.0  # s — exponential decay time constant
 # Diesel generator parameters
 DIESEL_START_DELAY_MIN: float = 10.0  # s — minimum time to come online
 DIESEL_START_DELAY_MAX: float = 15.0  # s — maximum time to come online
+# Diesel-backed pump recovery model: emergency buses can restore pumps, but below
+# nominal full-AC performance.
+DIESEL_PUMP_SPEED_MAX: float = 0.5  # normalized pump speed ceiling on diesel power
+DIESEL_PUMP_RAMP_RATE: float = 0.05  # /s ramp toward DIESEL_PUMP_SPEED_MAX
 
 # ECCS parameters
 ECCS_HPSI_THRESHOLD: float = 1.0e7    # Pa (100 bar) — HPSI actuates when pressure ≤ 100 bar
@@ -123,7 +127,7 @@ TAU_STEAM_GENERATOR: float = 60.0  # s
 
 # CVCS boration/dilution rate (Chemical and Volume Control System)
 # Real PWRs borate/dilute at 5–30 ppm/min; 10 ppm/min is a conservative mid-range value.
-BORON_RATE_PPM_PER_S: float = 10.0 / 60.0  # ppm/s
+BORON_RATE_PPM_PER_S: float = 200.0 / 60.0  # ppm/s
 
 # Control rod drive mechanism speed (real PWR CRDMs: ~45–72 steps/min ≈ 5–8 %/s).
 # 5 %/s prevents abrupt prompt-supercritical insertions while keeping manoeuvring practical.
@@ -185,3 +189,15 @@ G_NOMINAL: float = 3500.0     # kg/m²s  nominal PWR mass flux
 # Derived: target_peak_flux / (cosine_peak_shape * NOMINAL_POWER_W / (N * A_FUEL_NODE))
 #        = 5.9e5 / (1.34 * 3e9 / (10 * 0.06)) ≈ 8.8e-5
 HEAT_FLUX_SCALE: float = 8.8e-5  # dimensionless, physical rod-bundle area ratio
+
+# Numerical stabilization for two-phase coupling in 100 ms plant ticks.
+# Void generation/collapse is fast but not instantaneous at channel scale.
+# Internal void smoothing used by regime/feedback coupling.
+VOID_FRACTION_FILTER_TAU: float = 0.5  # s
+
+# Regime/HTC stabilization for Phase 2 coupling.
+# HTC is a bulk channel response, so apply a short lag to avoid 100 ms 10x jumps.
+REGIME_HTC_TAU: float = 1.0  # s
+# Film-boiling retreat hysteresis to avoid threshold chatter near alpha ~0.7.
+REGIME_FILM_EXIT_ALPHA: float = 0.55
+REGIME_FILM_EXIT_CHF_FRAC: float = 0.85

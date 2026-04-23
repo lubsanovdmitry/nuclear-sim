@@ -154,6 +154,9 @@ Critical for LOOP/SBO scenarios.
 
 - State: STANDBY / STARTING / RUNNING / FAILED
 - Start delay: 10–15 s (randomized) after signal
+- Replay/debug policy: runtime may expose an optional diesel RNG seed control.
+  If omitted, diesel timing remains unseeded (variable between runs). If a seed is
+  provided, start-delay sampling is deterministic for that run.
 - Failure: state set to FAILED immediately (for SBO scenario); probability-based failure
   not currently modeled but can be added for challenge mode
 - Powers: emergency buses, pump motors, ECCS
@@ -208,12 +211,13 @@ Decay heat builds until ECCS injection (if ECCS armed).
 
 ### LOCA — Loss of Coolant Accident
 
-**Trigger:** Large break in primary loop simulated by instantly dropping RCS pressure to 50 bar.
+**Trigger:** Large break in primary loop simulated by an instantaneous pressure drop
+proportional to break size (large break: 155 → 105 bar), followed by continuous blowdown.
 **Sequence:**
 
-1. t=0: Pressure set to 5×10⁶ Pa (50 bar), below SCRAM_LOW (120 bar) and HPSI (100 bar).
-2. SCRAM triggered by low pressure at next tick.
-3. ECCS HPSI activates immediately (pressure < 100 bar).
+1. t=0: Pressure reduced by `break_size × 50 bar` (large break: `155 → 105 bar`).
+2. SCRAM triggered by low pressure at next tick (`< 120 bar`).
+3. Continued blowdown drives pressure below 100 bar; ECCS HPSI then actuates.
 
 **Simplification note:** The void-formation positive reactivity spike seen during rapid
 depressurization is not modeled (no void reactivity coefficient). The physics captures

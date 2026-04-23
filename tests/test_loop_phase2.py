@@ -10,6 +10,7 @@ import pytest
 
 from api.state import default_state, PlantState
 from api.simulation_loop import simulation_tick
+from physics.two_phase import critical_heat_flux
 
 
 async def _run_ticks(state: PlantState, n: int, dt: float = 0.1) -> PlantState:
@@ -121,3 +122,73 @@ def test_phase1_loop_still_passes() -> None:
     assert abs(state.t_cool - T_REF_COOLANT) < 1.0
     assert abs(state.pressure - PRESSURE_NOMINAL) < 1.0e5
     assert state.flow_fraction > 0.999
+
+
+def test_chf_uses_current_tick_quality() -> None:
+    state = default_state()
+    state.pressure = 2.0e6  # 20 bar, drives positive quality from nominal coolant temperatures
+    state.quality = np.full(10, -0.3)
+    initial_chf = critical_heat_flux(state.flow_fraction, state.pressure, float(state.quality.mean()))
+
+    state = asyncio.run(_run_ticks(state, 1))
+    expected_chf = critical_heat_flux(state.flow_fraction, state.pressure, float(state.quality.mean()))
+
+    assert state.chf == pytest.approx(expected_chf)
+    assert state.chf < initial_chf
+
+
+def test_dnbr_responds_same_tick_as_quality_change() -> None:
+    state = default_state()
+    state.pressure = 2.0e6  # 20 bar
+    state.quality = np.full(10, -0.3)
+    state = asyncio.run(_run_ticks(state, 1))
+
+    assert float(state.quality.mean()) > 0.0
+    expected_dnbr = state.chf / max(float(state.heat_flux[state.peak_heat_flux_node]), 1.0)
+    assert state.dnbr == pytest.approx(expected_dnbr)
+
+
+def test_sbo_regime_chatter_reduced() -> None:
+    """SBO should not flip worst boiling regime every tick for long periods."""
+    order = ["single_phase", "subcooled_boiling", "nucleate_boiling", "film_boiling"]
+
+    state = default_state()
+    state.offsite_power = False
+    state.diesel_start_signals = [False, False]
+    for ds in state.diesel_states:
+        ds.state = "failed"
+
+    worst_prev = None
+    transitions = 0
+    for _ in range(1200):
+        state = asyncio.run(_run_ticks(state, 1))
+        worst_now = max(state.boiling_regime, key=lambda r: order.index(r))
+        if worst_prev is not None and worst_now != worst_prev:
+            transitions += 1
+        worst_prev = worst_now
+
+    assert transitions <= 20, f"Too many worst-regime transitions in SBO: {transitions}"
+
+
+def test_htc_rate_limited_across_regime_change() -> None:
+    """HTC should not jump by large factors within a single 100 ms tick."""
+    state = default_state()
+    htc0 = state.htc.copy()
+
+    # Force film-boiling classification on the next tick.
+    state.void_fraction = np.full(10, 0.8)
+    state.void_fraction_dyn = np.full(10, 0.8)
+    state = asyncio.run(_run_ticks(state, 1))
+    htc1 = state.htc.copy()
+
+    # Then force low void to push back toward non-film regime.
+    state.void_fraction = np.zeros(10)
+    state.void_fraction_dyn = np.zeros(10)
+    state = asyncio.run(_run_ticks(state, 1))
+    htc2 = state.htc.copy()
+
+    rel_step_1 = np.max(np.abs((htc1 - htc0) / np.maximum(htc0, 1.0)))
+    rel_step_2 = np.max(np.abs((htc2 - htc1) / np.maximum(htc1, 1.0)))
+
+    assert rel_step_1 < 0.5, f"HTC changed too quickly in one tick (step1): {rel_step_1:.3f}"
+    assert rel_step_2 < 0.5, f"HTC changed too quickly in one tick (step2): {rel_step_2:.3f}"

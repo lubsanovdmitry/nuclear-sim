@@ -12,6 +12,8 @@ from physics.constants import (
     CHF_0,
     CP_COOL,
     G_NOMINAL,
+    REGIME_FILM_EXIT_ALPHA,
+    REGIME_FILM_EXIT_CHF_FRAC,
     V_GJ,
 )
 
@@ -117,7 +119,12 @@ def void_fraction_subcooled(
     return float(np.clip(alpha_sub, 0.0, 0.15))
 
 
-def boiling_regime(alpha: float, heat_flux: float, chf: float) -> str:
+def boiling_regime(
+    alpha: float,
+    heat_flux: float,
+    chf: float,
+    prev_regime: str | None = None,
+) -> str:
     """Classify heat transfer regime.
 
     'single_phase'      — alpha == 0 and heat_flux < 0.3 * chf
@@ -127,6 +134,10 @@ def boiling_regime(alpha: float, heat_flux: float, chf: float) -> str:
     """
     if heat_flux >= chf or alpha > 0.7:
         return "film_boiling"
+    # Hysteresis: once in film boiling, require lower alpha / CHF margin to retreat.
+    if prev_regime == "film_boiling":
+        if alpha > REGIME_FILM_EXIT_ALPHA or heat_flux >= REGIME_FILM_EXIT_CHF_FRAC * chf:
+            return "film_boiling"
     if alpha > 0.0:
         return "nucleate_boiling"
     if heat_flux >= 0.3 * chf:

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from api.state import PlantState, default_state
-from api.simulation_loop import simulation_tick
+from api.simulation_loop import get_sim_rng_debug, set_sim_rng_seed, simulation_tick
 from physics.thermal import t_sat_celsius
 
 # ---------------------------------------------------------------------------
@@ -44,6 +44,19 @@ def _state_to_ws(s: PlantState) -> dict:
     t_hot_leg_c = 2.0 * s.t_cool - s.t_in - 273.15
     subcooling = t_sat_celsius(s.pressure) - t_hot_leg_c
     eccs = s.eccs_state
+    diesel_0_running = len(s.diesel_states) > 0 and s.diesel_states[0].state == "running"
+    diesel_1_running = len(s.diesel_states) > 1 and s.diesel_states[1].state == "running"
+    pump_power_source = []
+    for i in range(len(s.pumps)):
+        if s.offsite_power:
+            pump_power_source.append("offsite")
+            continue
+        diesel_powered = (i in (0, 1) and diesel_0_running) or (i in (2, 3) and diesel_1_running)
+        if diesel_powered:
+            pump_power_source.append("diesel")
+            continue
+        pump_power_source.append("none")
+    rng_debug = get_sim_rng_debug()
     return {
         "t": round(s.t, 2),
         "power_pct": round(s.n * 100.0, 3),
@@ -91,6 +104,16 @@ def _state_to_ws(s: PlantState) -> dict:
         "chf":                 round(s.chf, 1),
         "fuel_damage":         s.fuel_damage,
         "peak_heat_flux_node": s.peak_heat_flux_node,
+        # Replay/debug telemetry: non-breaking additions.
+        "diesel_start_signals": [bool(x) for x in s.diesel_start_signals],
+        "diesel_start_timer_s": [round(float(d.start_timer), 3) for d in s.diesel_states],
+        "diesel_start_delay_s": [round(float(d.start_delay), 3) for d in s.diesel_states],
+        "pump_speeds": [round(float(v), 4) for v in s.pump_speeds],
+        "pump_power_source": pump_power_source,
+        "diesel_rng_seed": rng_debug["diesel_rng_seed"],
+        "diesel_rng_seeded": bool(rng_debug["diesel_rng_seeded"]),
+        "diesel_rng_bit_generator": rng_debug["diesel_rng_bit_generator"],
+        "diesel_rng_state": rng_debug["diesel_rng_state"],
     }
 
 
@@ -170,12 +193,19 @@ class ControlInput(BaseModel):
     porv_open: Optional[bool] = None              # manually open/close PORV
     porv_stuck_open: Optional[bool] = None        # latch PORV in stuck-open failure
     scram_bypasses: Optional[list[str]] = None    # list of bypassed SCRAM channels
+    diesel_rng_seed: Optional[int] = None         # deterministic diesel timing; null -> randomize
 
 
 @app.post("/control")
 async def control(cmd: ControlInput) -> dict:
     global _state
     async with _lock:
+        fields_set = (
+            set(getattr(cmd, "model_fields_set"))
+            if hasattr(cmd, "model_fields_set")
+            else set(getattr(cmd, "__fields_set__", set()))
+        )
+
         if cmd.rod_positions is not None:
             _state.rod_target_positions = list(cmd.rod_positions)
         if cmd.pumps is not None:
@@ -204,6 +234,8 @@ async def control(cmd: ControlInput) -> dict:
                 _state.porv_open = True  # stuck-open means it opens and stays open
         if cmd.scram_bypasses is not None:
             _state.scram_bypasses = list(cmd.scram_bypasses)
+        if "diesel_rng_seed" in fields_set:
+            set_sim_rng_seed(cmd.diesel_rng_seed)
     return {"status": "ok"}
 
 
@@ -231,23 +263,8 @@ async def trigger_scenario(scenario: ScenarioInput) -> dict:
             from accidents.loca import trigger_loca
             _state = trigger_loca(_state, break_size=1.0)
         elif name == "rod_ejection":
-            # Eject bank A: mechanically failed rod moves from current position to 100%
-            # withdrawn instantly. ejection_rho is a permanent positive reactivity insertion
-            # (scales with how far the bank was inserted) that persists until SCRAM fires,
-            # at which point the remaining banks insert and it is zeroed out.
-            _ejected_bank = 0
-            current_pos = _state.rod_positions[_ejected_bank]
-            pos_change_fraction = (100.0 - current_pos) / 100.0  # 0 if already at 100%
-            # Ejection is mechanical failure — bypasses CRDM rate limit; set both actual and target.
-            rod_positions = list(_state.rod_positions)
-            rod_positions[_ejected_bank] = 100.0
-            _state.rod_positions = rod_positions
-            rod_targets = list(_state.rod_target_positions)
-            rod_targets[_ejected_bank] = 100.0
-            _state.rod_target_positions = rod_targets
-            _state.ejection_rho = 0.01 * pos_change_fraction  # up to +0.01 dk/k (SPEC value)
-            if "ROD_EJECTION" not in _state.alarms:
-                _state.alarms = list(_state.alarms) + ["ROD_EJECTION"]
+            from accidents.rod_ejection import trigger_rod_ejection
+            _state = trigger_rod_ejection(_state)
         elif name == "stuck_open_porv":
             # Stuck-open PORV (TMI-2 initiating event):
             # PORV opens at high pressure but fails to reclose — slow primary bleed.

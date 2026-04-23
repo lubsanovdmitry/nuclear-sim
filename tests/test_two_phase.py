@@ -156,6 +156,18 @@ class TestFilmBoilingRegime:
         htc = heat_transfer_coefficient("film_boiling", 1.0, 0.8)
         assert htc == 2500.0
 
+    def test_film_hysteresis_stays_film_near_boundary(self):
+        chf = 1.5e6
+        # Retreat criteria not met (alpha still above exit threshold).
+        regime = boiling_regime(0.60, 0.5e6, chf, prev_regime="film_boiling")
+        assert regime == "film_boiling"
+
+    def test_film_hysteresis_exits_when_margin_restored(self):
+        chf = 1.5e6
+        # Retreat criteria met: lower alpha and CHF margin restored.
+        regime = boiling_regime(0.40, 0.4e6, chf, prev_regime="film_boiling")
+        assert regime == "nucleate_boiling"
+
 
 class TestActualHeatFluxArray:
     def test_flat_shape_uniform(self):
